@@ -1,762 +1,478 @@
-import asyncio
-import json
-import os
-from datetime import datetime
-from pathlib import Path
-
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command, CommandObject
-from aiogram.types import (
-    Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-)
-from aiogram.enums import ParseMode
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
-
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise ValueError("Укажи BOT_TOKEN в .env файле")
-
-# ==================== НАСТРОЙКИ ====================
-ADMIN_ID = 7167734784
-
-DEFAULT_USERS = [
-    {"id": 6990139455, "name": "shammik_77", "username": "@shammik_77"},
-    {"id": 1307640212, "name": "dude87fx", "username": "@dude87fx"},
-    {"id": 6093086439, "name": "ronny_g7", "username": "@ronny_g7"},
-    {"id": 1051291465, "name": "paaltayev", "username": "@paaltayev"},
-    {"id": 1983522833, "name": "Atjnw", "username": "@Atjnw"},
-    {"id": 6078576183, "name": "Незнаю", "username": "@ya_ctoto"},
-]
-
-DEFAULT_TASKS = [
-    "🧹 Убрать комнату",
-    "🗑️ Вынести мусор",
-    "🍽️ Помыть посуду",
-]
-
-SEND_HOUR = 9
-SEND_MINUTE = 0
-
-DATA_FILE = Path("data.json")
-# ===================================================
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-scheduler = AsyncIOScheduler(timezone="Asia/Ashgabat")
-
-# ==================== КЛАВИАТУРЫ ====================
-
-def get_admin_keyboard():
-    """Кнопки для админа"""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="📊 Статус"),
-                KeyboardButton(text="🚀 Отправить сейчас"),
-                KeyboardButton(text="🔮 Кто завтра"),
-            ],
-            [
-                KeyboardButton(text="👥 Пользователи"),
-                KeyboardButton(text="📝 Задания"),
-                KeyboardButton(text="📜 История"),
-            ],
-            [
-                KeyboardButton(text="📢 Рассылка"),
-                KeyboardButton(text="🔄 Сброс"),
-                KeyboardButton(text="⏰ Время"),
-            ],
-            [
-                KeyboardButton(text="📋 Мои задания"),
-                KeyboardButton(text="❓ Помощь"),
-            ],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Выбери действие..."
-    )
-
-def get_user_keyboard():
-    """Кнопки для обычного пользователя"""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text="📋 Мои задания"),
-                KeyboardButton(text="❓ Помощь"),
-            ],
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Выбери действие..."
-    )
-
-# ==================== ДАННЫЕ ====================
-
-def load_data():
-    if DATA_FILE.exists():
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    else:
-        data = {}
-
-    data.setdefault("day_index", 0)
-    data.setdefault("current_assignments", {})
-    data.setdefault("completed", {})
-    data.setdefault("last_send_date", None)
-    data.setdefault("users", DEFAULT_USERS.copy())
-    data.setdefault("tasks", DEFAULT_TASKS.copy())
-    data.setdefault("history", [])
-    data.setdefault("send_hour", SEND_HOUR)
-    data.setdefault("send_minute", SEND_MINUTE)
-
-    seen = set()
-    unique_users = []
-    for u in data["users"]:
-        if u["id"] not in seen:
-            seen.add(u["id"])
-            unique_users.append(u)
-    data["users"] = unique_users
-
-    return data
-
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def get_users():
-    return load_data()["users"]
-
-def get_tasks():
-    return load_data()["tasks"]
-
-def is_admin(user_id: int) -> bool:
-    return user_id == ADMIN_ID
-
-def get_today_assignments(day_index: int, users: list, tasks: list):
-    if not users:
-        return {}
-    n = len(users)
-    user = users[day_index % n]
-    return {str(user["id"]): tasks.copy()}
-
-def make_task_keyboard(user_id: str, tasks: list, completed: list):
-    buttons = []
-    for task in tasks:
-        if task in completed:
-            buttons.append([InlineKeyboardButton(
-                text=f"✅ {task}",
-                callback_data=f"done:{user_id}:{task}"
-            )])
-        else:
-            buttons.append([InlineKeyboardButton(
-                text=f"⬜ {task}",
-                callback_data=f"done:{user_id}:{task}"
-            )])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-async def send_daily_tasks(force: bool = False):
-    data = load_data()
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    if not force and data.get("last_send_date") == today:
-        return
-
-    users = data["users"]
-    tasks = data["tasks"]
-
-    if not users:
-        await bot.send_message(ADMIN_ID, "⚠️ Нет пользователей для назначения заданий!")
-        return
-    if not tasks:
-        await bot.send_message(ADMIN_ID, "⚠️ Нет заданий!")
-        return
-
-    if data.get("current_assignments") and data.get("last_send_date"):
-        data["history"].append({
-            "date": data["last_send_date"],
-            "assignments": data["current_assignments"],
-            "completed": data["completed"]
-        })
-        data["history"] = data["history"][-30:]
-
-    assignments = get_today_assignments(data["day_index"], users, tasks)
-    data["current_assignments"] = assignments
-    data["completed"] = {uid: [] for uid in assignments}
-    data["last_send_date"] = today
-    data["day_index"] += 1
-    save_data(data)
-
-    for uid_str, task_list in assignments.items():
-        uid = int(uid_str)
-        user = next((u for u in users if u["id"] == uid), None)
-        name = user["name"] if user else "друг"
-
-        text = (
-            f"📅 <b>Задания на сегодня</b>\n\n"
-            f"Привет, {name}!\n"
-            f"Сегодня твои задания:\n\n"
-        )
-        for i, t in enumerate(task_list, 1):
-            text += f"{i}. {t}\n"
-        text += "\nНажми на кнопку, когда выполнишь задание 👇"
-
-        kb = make_task_keyboard(uid_str, task_list, [])
-
-        try:
-            await bot.send_message(uid, text, reply_markup=kb, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            await bot.send_message(
-                ADMIN_ID,
-                f"⚠️ Не удалось отправить задания {uid}:\n<code>{e}</code>",
-                parse_mode=ParseMode.HTML
-            )
-
-    summary = "📋 <b>Сегодняшние назначения:</b>\n\n"
-    for uid_str, task_list in assignments.items():
-        user = next((u for u in users if str(u["id"]) == uid_str), None)
-        name = user["username"] if user else uid_str
-        summary += f"<b>{name}</b>:\n"
-        for t in task_list:
-            summary += f"  • {t}\n"
-        summary += "\n"
-    await bot.send_message(ADMIN_ID, summary, parse_mode=ParseMode.HTML)
-
-# ==================== КОМАНДЫ И КНОПКИ ====================
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    user_id = message.from_user.id
-    users = get_users()
-    is_user = any(u["id"] == user_id for u in users)
-
-    if is_admin(user_id):
-        await message.answer(
-            "👋 <b>Админ-панель</b>\n\n"
-            "Используй кнопки внизу или команды.\n\n"
-            "<b>Основные:</b>\n"
-            "/status — статус сегодня\n"
-            "/force — отправить задания сейчас\n"
-            "/who — кому завтра\n"
-            "/history — история\n\n"
-            "<b>Пользователи:</b>\n"
-            "/users — список\n"
-            "/adduser ID Имя @username\n"
-            "/deluser ID\n\n"
-            "<b>Задания:</b>\n"
-            "/tasks — список\n"
-            "/addtask Текст\n"
-            "/deltask номер\n\n"
-            "<b>Другое:</b>\n"
-            "/broadcast Текст\n"
-            "/reset — сбросить ротацию\n"
-            "/settime ЧЧ ММ",
-            reply_markup=get_admin_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-    elif is_user:
-        await message.answer(
-            "👋 Привет!\n\n"
-            "Я присылаю тебе задания каждый день.\n\n"
-            "Нажми <b>📋 Мои задания</b> чтобы посмотреть текущие задачи.\n"
-            "Когда выполнишь — нажми кнопку ✅ под сообщением.",
-            reply_markup=get_user_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-    else:
-        await message.answer("⛔ У тебя нет доступа к этому боту.")
-
-@dp.message(Command("help"))
-@dp.message(F.text == "❓ Помощь")
-async def cmd_help(message: Message):
-    user_id = message.from_user.id
-
-    if is_admin(user_id):
-        await cmd_start(message)
-        return
-
-    users = get_users()
-    if any(u["id"] == user_id for u in users):
-        await message.answer(
-            "📖 <b>Справка</b>\n\n"
-            "📋 Мои задания — посмотреть задания на сегодня\n"
-            "❓ Помощь — эта справка\n\n"
-            "Бот сам присылает задания каждый день.\n"
-            "Чтобы отметить выполнение — нажми кнопку под сообщением.",
-            reply_markup=get_user_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-    else:
-        await message.answer("⛔ У тебя нет доступа.")
-
-@dp.message(Command("mytasks"))
-@dp.message(F.text == "📋 Мои задания")
-async def cmd_mytasks(message: Message):
-    user_id = message.from_user.id
-    data = load_data()
-    users = data["users"]
-
-    if not any(u["id"] == user_id for u in users) and not is_admin(user_id):
-        await message.answer("⛔ У тебя нет доступа.")
-        return
-
-    uid_str = str(user_id)
-    assignments = data.get("current_assignments", {})
-    completed = data.get("completed", {})
-
-    if is_admin(user_id) and uid_str not in assignments:
-        await message.answer(
-            "У тебя нет заданий на сегодня (ты админ).\n"
-            "Используй кнопку «📊 Статус»."
-        )
-        return
-
-    if uid_str not in assignments:
-        await message.answer(
-            "📭 На сегодня у тебя нет заданий.\n"
-            "Бот пришлёт их, когда наступит твоя очередь."
-        )
-        return
-
-    tasks = assignments[uid_str]
-    done = completed.get(uid_str, [])
-
-    text = "📋 <b>Твои задания на сегодня:</b>\n\n"
-    for t in tasks:
-        mark = "✅" if t in done else "⬜"
-        text += f"{mark} {t}\n"
-
-    if len(done) == len(tasks):
-        text += "\n🎉 Все задания выполнены!"
-    else:
-        text += f"\nВыполнено: {len(done)}/{len(tasks)}"
-
-    kb = make_task_keyboard(uid_str, tasks, done)
-    await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("status"))
-@dp.message(F.text == "📊 Статус")
-async def cmd_status(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    data = load_data()
-    assignments = data.get("current_assignments", {})
-    completed = data.get("completed", {})
-    users = data["users"]
-
-    if not assignments:
-        await message.answer("Сегодня ещё нет назначенных заданий.\nНажми «🚀 Отправить сейчас»")
-        return
-
-    text = f"📊 <b>Статус на {data.get('last_send_date', 'сегодня')}:</b>\n\n"
-    for uid_str, task_list in assignments.items():
-        user = next((u for u in users if str(u["id"]) == uid_str), None)
-        name = user["username"] if user else uid_str
-        done = completed.get(uid_str, [])
-        text += f"<b>{name}</b>\n"
-        for t in task_list:
-            mark = "✅" if t in done else "⬜"
-            text += f"  {mark} {t}\n"
-        text += "\n"
-
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("force"))
-@dp.message(F.text == "🚀 Отправить сейчас")
-async def cmd_force(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    await message.answer("⏳ Отправляю задания...")
-    await send_daily_tasks(force=True)
-    await message.answer("✅ Готово!")
-
-@dp.message(Command("who"))
-@dp.message(F.text == "🔮 Кто завтра")
-async def cmd_who(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    data = load_data()
-    users = data["users"]
-    tasks = data["tasks"]
-
-    if not users:
-        await message.answer("Нет пользователей.")
-        return
-
-    next_index = data["day_index"] % len(users)
-    next_user = users[next_index]
-
-    text = (
-        f"🔮 <b>Завтра задания получит:</b>\n\n"
-        f"{next_user['username']} ({next_user['name']})\n"
-        f"ID: <code>{next_user['id']}</code>\n\n"
-        f"<b>Задания:</b>\n"
-    )
-    for t in tasks:
-        text += f"• {t}\n"
-
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("users"))
-@dp.message(F.text == "👥 Пользователи")
-async def cmd_users(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    users = get_users()
-    if not users:
-        await message.answer("Список пользователей пуст.")
-        return
-
-    text = f"👥 <b>Пользователи ({len(users)}):</b>\n\n"
-    for i, u in enumerate(users, 1):
-        text += f"{i}. {u['username']} — {u['name']}\n   ID: <code>{u['id']}</code>\n\n"
-    text += "\nДобавить: /adduser ID Имя @username\nУдалить: /deluser ID"
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("adduser"))
-async def cmd_adduser(message: Message, command: CommandObject):
-    if not is_admin(message.from_user.id):
-        return
-
-    if not command.args:
-        await message.answer(
-            "Формат:\n<code>/adduser 123456789 Имя @username</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    parts = command.args.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.answer("Нужно: ID Имя @username")
-        return
-
-    try:
-        uid = int(parts[0])
-    except ValueError:
-        await message.answer("ID должен быть числом.")
-        return
-
-    name = parts[1]
-    username = parts[2]
-    if not username.startswith("@"):
-        username = "@" + username
-
-    data = load_data()
-    if any(u["id"] == uid for u in data["users"]):
-        await message.answer("Этот пользователь уже есть в списке.")
-        return
-
-    data["users"].append({"id": uid, "name": name, "username": username})
-    save_data(data)
-    await message.answer(
-        f"✅ Добавлен: {username} ({name}) — <code>{uid}</code>",
-        parse_mode=ParseMode.HTML
-    )
-
-@dp.message(Command("deluser"))
-async def cmd_deluser(message: Message, command: CommandObject):
-    if not is_admin(message.from_user.id):
-        return
-
-    if not command.args:
-        await message.answer(
-            "Формат: <code>/deluser 123456789</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    try:
-        uid = int(command.args.strip())
-    except ValueError:
-        await message.answer("ID должен быть числом.")
-        return
-
-    data = load_data()
-    before = len(data["users"])
-    data["users"] = [u for u in data["users"] if u["id"] != uid]
-    after = len(data["users"])
-
-    if before == after:
-        await message.answer("Пользователь не найден.")
-    else:
-        save_data(data)
-        await message.answer(
-            f"✅ Пользователь <code>{uid}</code> удалён.",
-            parse_mode=ParseMode.HTML
-        )
-
-@dp.message(Command("tasks"))
-@dp.message(F.text == "📝 Задания")
-async def cmd_tasks(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    tasks = get_tasks()
-    if not tasks:
-        await message.answer("Список заданий пуст.")
-        return
-
-    text = f"📝 <b>Задания ({len(tasks)}):</b>\n\n"
-    for i, t in enumerate(tasks, 1):
-        text += f"{i}. {t}\n"
-    text += "\nДобавить: /addtask Текст\nУдалить: /deltask номер"
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("addtask"))
-async def cmd_addtask(message: Message, command: CommandObject):
-    if not is_admin(message.from_user.id):
-        return
-
-    if not command.args:
-        await message.answer(
-            "Формат: <code>/addtask 🧹 Помыть пол</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    task = command.args.strip()
-    data = load_data()
-    data["tasks"].append(task)
-    save_data(data)
-    await message.answer(f"✅ Задание добавлено:\n{task}")
-
-@dp.message(Command("deltask"))
-async def cmd_deltask(message: Message, command: CommandObject):
-    if not is_admin(message.from_user.id):
-        return
-
-    if not command.args:
-        await message.answer(
-            "Формат: <code>/deltask 2</code> (номер из /tasks)",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    try:
-        num = int(command.args.strip())
-    except ValueError:
-        await message.answer("Номер должен быть числом.")
-        return
-
-    data = load_data()
-    if num < 1 or num > len(data["tasks"]):
-        await message.answer(f"Номер должен быть от 1 до {len(data['tasks'])}")
-        return
-
-    removed = data["tasks"].pop(num - 1)
-    save_data(data)
-    await message.answer(f"✅ Удалено:\n{removed}")
-
-@dp.message(Command("history"))
-@dp.message(F.text == "📜 История")
-async def cmd_history(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    data = load_data()
-    history = data.get("history", [])
-
-    if not history:
-        await message.answer("История пока пуста.")
-        return
-
-    text = "📜 <b>История (последние 7 дней):</b>\n\n"
-    for entry in history[-7:]:
-        text += f"<b>{entry['date']}</b>\n"
-        for uid_str, task_list in entry.get("assignments", {}).items():
-            user = next((u for u in data["users"] if str(u["id"]) == uid_str), None)
-            name = user["username"] if user else uid_str
-            done = entry.get("completed", {}).get(uid_str, [])
-            text += f"  {name}:\n"
-            for t in task_list:
-                mark = "✅" if t in done else "❌"
-                text += f"    {mark} {t}\n"
-        text += "\n"
-
-    await message.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("reset"))
-@dp.message(F.text == "🔄 Сброс")
-async def cmd_reset(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-
-    data = load_data()
-    data["day_index"] = 0
-    save_data(data)
-    await message.answer("✅ Ротация сброшена. Следующий — первый в списке.")
-
-@dp.message(Command("broadcast"))
-@dp.message(F.text == "📢 Рассылка")
-async def cmd_broadcast(message: Message, command: CommandObject = None):
-    if not is_admin(message.from_user.id):
-        return
-
-    # Если нажали кнопку — просим текст
-    if message.text == "📢 Рассылка":
-        await message.answer(
-            "Отправь сообщение для рассылки в формате:\n"
-            "<code>/broadcast Текст сообщения</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    if not command or not command.args:
-        await message.answer(
-            "Формат: <code>/broadcast Текст сообщения</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    text = command.args
-    users = get_users()
-    ok = 0
-    fail = 0
-
-    await message.answer(f"⏳ Рассылка {len(users)} пользователям...")
-
-    for u in users:
-        try:
-            await bot.send_message(
-                u["id"],
-                f"📢 <b>Сообщение от админа:</b>\n\n{text}",
-                parse_mode=ParseMode.HTML
-            )
-            ok += 1
-        except Exception:
-            fail += 1
-        await asyncio.sleep(0.05)
-
-    await message.answer(f"✅ Готово: успешно {ok}, ошибок {fail}")
-
-@dp.message(Command("settime"))
-@dp.message(F.text == "⏰ Время")
-async def cmd_settime(message: Message, command: CommandObject = None):
-    if not is_admin(message.from_user.id):
-        return
-
-    data = load_data()
-
-    # Если нажали кнопку — показываем текущее время
-    if message.text == "⏰ Время":
-        await message.answer(
-            f"Сейчас время рассылки: <b>{data['send_hour']:02d}:{data['send_minute']:02d}</b>\n\n"
-            f"Изменить: <code>/settime 9 0</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    if not command or not command.args:
-        await message.answer(
-            f"Сейчас время: <b>{data['send_hour']:02d}:{data['send_minute']:02d}</b>\n\n"
-            f"Формат: <code>/settime 9 0</code>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
-    parts = command.args.split()
-    if len(parts) != 2:
-        await message.answer("Нужно два числа: час и минута")
-        return
-
-    try:
-        hour = int(parts[0])
-        minute = int(parts[1])
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            raise ValueError
-    except ValueError:
-        await message.answer("Час 0–23, минута 0–59")
-        return
-
-    data["send_hour"] = hour
-    data["send_minute"] = minute
-    save_data(data)
-
-    try:
-        scheduler.remove_job("daily_tasks")
-    except Exception:
-        pass
-
-    scheduler.add_job(
-        send_daily_tasks,
-        trigger="cron",
-        hour=hour,
-        minute=minute,
-        id="daily_tasks"
-    )
-
-    await message.answer(
-        f"✅ Время рассылки изменено на <b>{hour:02d}:{minute:02d}</b>",
-        parse_mode=ParseMode.HTML
-    )
-
-# ==================== CALLBACK ====================
-
-@dp.callback_query(F.data.startswith("done:"))
-async def on_task_done(callback: CallbackQuery):
-    parts = callback.data.split(":", 2)
-    if len(parts) < 3:
-        await callback.answer("Ошибка данных")
-        return
-
-    _, uid_str, task = parts
-    user_id = callback.from_user.id
-
-    if str(user_id) != uid_str:
-        await callback.answer("Это не твоё задание!", show_alert=True)
-        return
-
-    data = load_data()
-    completed = data.get("completed", {})
-    if uid_str not in completed:
-        completed[uid_str] = []
-
-    if task in completed[uid_str]:
-        completed[uid_str].remove(task)
-        await callback.answer("Отметка снята")
-    else:
-        completed[uid_str].append(task)
-        await callback.answer("Отлично! Задание выполнено 🐦")
-
-        user = next((u for u in data["users"] if u["id"] == user_id), None)
-        name = user["username"] if user else str(user_id)
-        await bot.send_message(
-            ADMIN_ID,
-            f"✅ {name} выполнил:\n{task}"
-        )
-
-    data["completed"] = completed
-    save_data(data)
-
-    tasks = data["current_assignments"].get(uid_str, [])
-    kb = make_task_keyboard(uid_str, tasks, completed[uid_str])
-    try:
-        await callback.message.edit_reply_markup(reply_markup=kb)
-    except Exception:
-        pass
-
-# ==================== ЗАПУСК ====================
-
-async def main():
-    data = load_data()
-    hour = data.get("send_hour", SEND_HOUR)
-    minute = data.get("send_minute", SEND_MINUTE)
-
-    scheduler.add_job(
-        send_daily_tasks,
-        trigger="cron",
-        hour=hour,
-        minute=minute,
-        id="daily_tasks"
-    )
-    scheduler.start()
-
-    print(f"Бот запущен. Рассылка в {hour:02d}:{minute:02d}")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Админ-панель • Telegram Task Bot</title>
+<style>
+    :root {
+        --bg: #0f1117;
+        --bg-card: #1a1d27;
+        --bg-hover: #242836;
+        --border: #2e3345;
+        --text: #e8eaed;
+        --text-muted: #9aa0b4;
+        --accent: #5b8def;
+        --accent-hover: #4a7de0;
+        --success: #3ecf8e;
+        --danger: #f07178;
+        --warning: #e6b450;
+        --radius: 12px;
+        --shadow: 0 4px 24px rgba(0,0,0,0.35);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        min-height: 100vh;
+        display: flex;
+    }
+    .sidebar {
+        width: 250px;
+        background: var(--bg-card);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        padding: 18px 10px;
+        position: fixed;
+        height: 100vh;
+        z-index: 100;
+        overflow-y: auto;
+    }
+    .logo {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 8px 16px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 12px;
+    }
+    .logo-icon {
+        width: 38px; height: 38px;
+        background: linear-gradient(135deg, var(--accent), #8b5cf6);
+        border-radius: 10px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 18px;
+    }
+    .logo-text { font-size: 16px; font-weight: 700; }
+    .logo-sub { font-size: 11px; color: var(--text-muted); }
+    .nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+    .nav-section {
+        font-size: 10px; color: var(--text-muted);
+        padding: 10px 10px 4px; text-transform: uppercase;
+        letter-spacing: 0.5px; font-weight: 600;
+    }
+    .nav-btn {
+        display: flex; align-items: center; gap: 10px;
+        padding: 9px 11px; border: none; background: transparent;
+        color: var(--text-muted); font-size: 13px; border-radius: 8px;
+        cursor: pointer; transition: all 0.15s; text-align: left; width: 100%;
+    }
+    .nav-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .nav-btn.active {
+        background: rgba(91,141,239,0.15); color: var(--accent); font-weight: 600;
+    }
+    .nav-btn .icon { font-size: 15px; width: 20px; text-align: center; }
+    .sidebar-footer {
+        padding-top: 10px; border-top: 1px solid var(--border);
+        font-size: 11px; color: var(--text-muted); text-align: center;
+    }
+    .main {
+        flex: 1; margin-left: 250px; padding: 24px 32px; max-width: 1000px;
+    }
+    .page { display: none; animation: fadeIn 0.2s ease; }
+    .page.active { display: block; }
+    @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(5px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .page-header { margin-bottom: 20px; }
+    .page-header h1 { font-size: 24px; font-weight: 700; margin-bottom: 3px; }
+    .page-header p { color: var(--text-muted); font-size: 13px; }
+    .card {
+        background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 18px; margin-bottom: 14px;
+        box-shadow: var(--shadow);
+    }
+    .card-title {
+        font-size: 14px; font-weight: 600; margin-bottom: 12px;
+        display: flex; align-items: center; gap: 7px;
+    }
+    .form-group { margin-bottom: 12px; }
+    label {
+        display: block; font-size: 12px; font-weight: 500;
+        color: var(--text-muted); margin-bottom: 4px;
+    }
+    input, textarea {
+        width: 100%; padding: 10px 12px; background: var(--bg);
+        border: 1px solid var(--border); border-radius: 8px;
+        color: var(--text); font-size: 14px; outline: none;
+    }
+    input:focus, textarea:focus { border-color: var(--accent); }
+    .row { display: flex; gap: 10px; }
+    .row > * { flex: 1; }
+    .btn {
+        display: inline-flex; align-items: center; justify-content: center;
+        gap: 6px; padding: 10px 16px; border: none; border-radius: 8px;
+        font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-success { background: var(--success); color: #0f1117; }
+    .btn-danger {
+        background: rgba(240,113,120,0.12); color: var(--danger);
+        border: 1px solid rgba(240,113,120,0.25);
+    }
+    .btn-ghost { background: var(--bg-hover); color: var(--text); }
+    .btn-warning {
+        background: rgba(230,180,80,0.15); color: var(--warning);
+        border: 1px solid rgba(230,180,80,0.3);
+    }
+    .btn-sm { padding: 5px 10px; font-size: 12px; }
+    .stats {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+        gap: 10px; margin-bottom: 16px;
+    }
+    .stat-card {
+        background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 14px; text-align: center;
+    }
+    .stat-value { font-size: 24px; font-weight: 700; color: var(--accent); }
+    .stat-label { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+    .list { display: flex; flex-direction: column; gap: 5px; }
+    .list-item {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 11px 13px; background: var(--bg); border: 1px solid var(--border);
+        border-radius: 8px;
+    }
+    .token-box {
+        background: linear-gradient(135deg, rgba(91,141,239,0.08), rgba(139,92,246,0.08));
+        border: 1px solid rgba(91,141,239,0.25); border-radius: var(--radius);
+        padding: 16px; margin-bottom: 16px;
+    }
+    .token-status { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
+    .dot.online { background: var(--success); box-shadow: 0 0 8px var(--success); }
+    .toast {
+        position: fixed; bottom: 18px; right: 18px; background: var(--bg-card);
+        border: 1px solid var(--border); padding: 11px 16px; border-radius: 10px;
+        box-shadow: var(--shadow); z-index: 999; transform: translateY(70px);
+        opacity: 0; transition: all 0.25s; font-size: 13px;
+    }
+    .toast.show { transform: translateY(0); opacity: 1; }
+    .toast.success { border-left: 4px solid var(--success); }
+    .toast.error { border-left: 4px solid var(--danger); }
+    .quick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+    .quick-btn {
+        display: flex; flex-direction: column; align-items: center; gap: 6px;
+        padding: 14px 10px; background: var(--bg); border: 1px solid var(--border);
+        border-radius: 9px; cursor: pointer; color: var(--text); font-size: 12px;
+    }
+    .login-overlay {
+        position: fixed; inset: 0; background: var(--bg); z-index: 1000;
+        display: flex; align-items: center; justify-content: center; padding: 20px;
+    }
+    .login-overlay.hidden { display: none; }
+    .login-box {
+        background: var(--bg-card); border: 1px solid var(--border);
+        border-radius: 16px; padding: 36px 32px; width: 100%; max-width: 380px;
+    }
+</style>
+</head>
+<body>
+
+<div class="login-overlay" id="loginOverlay">
+    <div class="login-box">
+        <h2 style="text-align:center;margin-bottom:12px">🔐 Вход</h2>
+        <div class="form-group">
+            <label>Логин</label>
+            <input type="text" id="loginUser" placeholder="dev.shammik.tm@gmail.com">
+        </div>
+        <div class="form-group">
+            <label>Пароль</label>
+            <input type="password" id="loginPass" placeholder="••••••••">
+        </div>
+        <button class="btn btn-primary" style="width:100%;margin-top:8px" onclick="doLogin()">Войти</button>
+    </div>
+</div>
+
+<aside class="sidebar">
+    <div class="logo">
+        <div class="logo-icon">🤖</div>
+        <div>
+            <div class="logo-text">Task Bot</div>
+            <div class="logo-sub">Kuala Lumpur 00:00</div>
+        </div>
+    </div>
+    <nav class="nav">
+        <button class="nav-btn active" onclick="goPage('dashboard')"><span class="icon">🏠</span> Дашборд</button>
+        <button class="nav-btn" onclick="goPage('status')"><span class="icon">📊</span> Статус</button>
+        <button class="nav-btn" onclick="goPage('force')"><span class="icon">🚀</span> Отправить сейчас</button>
+        <button class="nav-btn" onclick="goPage('who')"><span class="icon">🔮</span> Кто завтра</button>
+        <button class="nav-btn" onclick="goPage('users')"><span class="icon">👥</span> Пользователи</button>
+        <button class="nav-btn" onclick="goPage('tasks')"><span class="icon">📝</span> Задания</button>
+        <button class="nav-btn" onclick="goPage('reset')"><span class="icon">🔄</span> Сброс</button>
+        <button class="nav-btn" onclick="goPage('time')"><span class="icon">⏰</span> Время</button>
+    </nav>
+    <div class="sidebar-footer">
+        <button class="btn btn-ghost btn-sm" onclick="doLogout()" style="width:100%">🚪 Выйти</button>
+    </div>
+</aside>
+
+<main class="main">
+
+    <div class="page active" id="page-dashboard">
+        <div class="page-header">
+            <h1>Дашборд</h1>
+            <p>Автоматическая рассылка в 00:00 (Kuala Lumpur)</p>
+        </div>
+
+        <div class="token-box">
+            <div class="card-title">🌐 Статус Python-сервера</div>
+            <div class="token-status">
+                <div class="dot" id="statusDot"></div>
+                <span id="statusText">Подключение...</span>
+            </div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="statUsers">0</div>
+                <div class="stat-label">Пользователей</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="statTasks">0</div>
+                <div class="stat-label">Заданий</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="statDay">0</div>
+                <div class="stat-label">День ротации</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-title">⚡ Быстрые действия</div>
+            <div class="quick-grid">
+                <button class="quick-btn" onclick="goPage('status')">📊 Статус</button>
+                <button class="quick-btn" onclick="goPage('force')">🚀 Отправить</button>
+                <button class="quick-btn" onclick="goPage('who')">🔮 Кто завтра</button>
+                <button class="quick-btn" onclick="goPage('users')">👥 Люди</button>
+                <button class="quick-btn" onclick="goPage('tasks')">📝 Задания</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="page" id="page-status">
+        <div class="page-header"><h1>📊 Статус</h1></div>
+        <div class="card"><div id="statusContent"></div></div>
+    </div>
+
+    <div class="page" id="page-force">
+        <div class="page-header"><h1>🚀 Отправить сейчас</h1></div>
+        <div class="card">
+            <p id="forcePreview" style="margin-bottom:12px">Загрузка...</p>
+            <button class="btn btn-success" onclick="forceSend()">🚀 Раздать задания прямо сейчас</button>
+        </div>
+    </div>
+
+    <div class="page" id="page-who">
+        <div class="page-header"><h1>🔮 Кто следующий (в 00:00)</h1></div>
+        <div class="card"><div id="whoContent"></div></div>
+    </div>
+
+    <div class="page" id="page-users">
+        <div class="page-header"><h1>👥 Пользователи</h1></div>
+        <div class="card">
+            <div class="row">
+                <input type="number" id="userId" placeholder="Telegram ID">
+                <input type="text" id="userName" placeholder="Имя">
+                <input type="text" id="userUsername" placeholder="@username">
+            </div>
+            <button class="btn btn-primary" onclick="addUser()" style="margin-top:10px">Добавить</button>
+        </div>
+        <div class="card">
+            <div class="list" id="usersList"></div>
+        </div>
+    </div>
+
+    <div class="page" id="page-tasks">
+        <div class="page-header"><h1>📝 Задания</h1></div>
+        <div class="card">
+            <input type="text" id="taskText" placeholder="Новое задание">
+            <button class="btn btn-primary" onclick="addTask()" style="margin-top:10px">Добавить</button>
+        </div>
+        <div class="card">
+            <div class="list" id="tasksList"></div>
+        </div>
+    </div>
+
+    <div class="page" id="page-reset">
+        <div class="page-header"><h1>🔄 Сброс ротации</h1></div>
+        <div class="card">
+            <button class="btn btn-warning" onclick="doReset()">Сбросить очередь на 0</button>
+        </div>
+    </div>
+
+    <div class="page" id="page-time">
+        <div class="page-header"><h1>⏰ Время рассылки</h1></div>
+        <div class="card">
+            <div class="row">
+                <input type="number" id="sendHour" min="0" max="23" placeholder="Час (по умолч. 0)">
+                <input type="number" id="sendMinute" min="0" max="59" placeholder="Минута (по умолч. 0)">
+            </div>
+            <button class="btn btn-primary" onclick="saveTime()" style="margin-top:10px">Сохранить время</button>
+        </div>
+    </div>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+    // Замени localhost на IP своего сервера, если открываешь с телефона!
+    const API_URL = 'http://localhost:8080/api';
+
+    let state = { users: [], tasks: [], day_index: 0, send_hour: 0, send_minute: 0 };
+
+    async function syncLoad() {
+        try {
+            const res = await fetch(`${API_URL}/data`);
+            if (res.ok) {
+                state = await res.json();
+                renderAll();
+                document.getElementById('statusDot').className = 'dot online';
+                document.getElementById('statusText').textContent = 'Подключено к Python (Kuala Lumpur)';
+            }
+        } catch (e) {
+            document.getElementById('statusDot').className = 'dot';
+            document.getElementById('statusText').textContent = 'Нет связи с main.py';
+        }
+    }
+
+    async function syncSave() {
+        try {
+            await fetch(`${API_URL}/data`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(state)
+            });
+            renderAll();
+            toast('Сохранено', 'success');
+        } catch (e) {
+            toast('Ошибка сохранения', 'error');
+        }
+    }
+
+    async function forceSend() {
+        try {
+            await fetch(`${API_URL}/force`, { method: 'POST' });
+            toast('Задания успешно отправлены!', 'success');
+            syncLoad();
+        } catch(e) {
+            toast('Ошибка отправки', 'error');
+        }
+    }
+
+    setInterval(syncLoad, 3000);
+
+    function doLogin() {
+        const u = document.getElementById('loginUser').value.trim();
+        const p = document.getElementById('loginPass').value;
+        if (u === 'dev.shammik.tm@gmail.com' && p === 'shammik@marjin3003') {
+            sessionStorage.setItem('tb_auth', '1');
+            document.getElementById('loginOverlay').classList.add('hidden');
+            syncLoad();
+        } else alert('Неверный логин/пароль');
+    }
+
+    function doLogout() {
+        sessionStorage.removeItem('tb_auth');
+        document.getElementById('loginOverlay').classList.remove('hidden');
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        if (sessionStorage.getItem('tb_auth') === '1') {
+            document.getElementById('loginOverlay').classList.add('hidden');
+            syncLoad();
+        }
+    });
+
+    function goPage(name) {
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        document.getElementById('page-' + name).classList.add('active');
+    }
+
+    function renderAll() {
+        document.getElementById('statUsers').textContent = state.users.length;
+        document.getElementById('statTasks').textContent = state.tasks.length;
+        document.getElementById('statDay').textContent = state.day_index;
+
+        document.getElementById('usersList').innerHTML = state.users.map(u => `
+            <div class="list-item">
+                <div><b>${u.username}</b> — ${u.name}</div>
+                <button class="btn btn-danger btn-sm" onclick="removeUser(${u.id})">✕</button>
+            </div>
+        `).join('');
+
+        document.getElementById('tasksList').innerHTML = state.tasks.map((t, i) => `
+            <div class="list-item">
+                <div>${i + 1}. ${t}</div>
+                <button class="btn btn-danger btn-sm" onclick="removeTask(${i})">✕</button>
+            </div>
+        `).join('');
+
+        if (state.users.length) {
+            const next = state.users[state.day_index % state.users.length];
+            document.getElementById('forcePreview').innerHTML = `Следующий получатель: <b>${next.name}</b> (${next.username})`;
+            document.getElementById('whoContent').innerHTML = `Завтра в 00:00 получит: <b>${next.name}</b> (${next.username})`;
+        }
+        document.getElementById('statusContent').textContent = `Последняя отправка: ${state.last_send_date || 'Ещё не было'}`;
+    }
+
+    function addUser() {
+        const id = parseInt(document.getElementById('userId').value);
+        const name = document.getElementById('userName').value.trim();
+        let username = document.getElementById('userUsername').value.trim();
+        if (!id || !name) return toast('Укажите ID и Имя', 'error');
+        state.users.push({ id, name, username: username || '—' });
+        syncSave();
+    }
+
+    function removeUser(id) {
+        state.users = state.users.filter(u => u.id !== id);
+        syncSave();
+    }
+
+    function addTask() {
+        const text = document.getElementById('taskText').value.trim();
+        if (!text) return;
+        state.tasks.push(text);
+        syncSave();
+    }
+
+    function removeTask(i) {
+        state.tasks.splice(i, 1);
+        syncSave();
+    }
+
+    function doReset() {
+        state.day_index = 0;
+        syncSave();
+    }
+
+    function saveTime() {
+        state.send_hour = parseInt(document.getElementById('sendHour').value) || 0;
+        state.send_minute = parseInt(document.getElementById('sendMinute').value) || 0;
+        syncSave();
+    }
+
+    function toast(msg, type) {
+        const el = document.getElementById('toast');
+        el.textContent = msg;
+        el.className = 'toast ' + type + ' show';
+        setTimeout(() => el.classList.remove('show'), 2500);
+    }
+</script>
+</body>
+</html>

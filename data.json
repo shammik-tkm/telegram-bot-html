@@ -1,0 +1,44 @@
+{
+  "day_index": 1,
+  "current_assignments": {
+    "6990139455": [
+      "🧹 Убрать комнату",
+      "🗑️ Вынести мусор",
+      "🍽️ Помыть посуду"
+    ]
+  },
+  "completed": {
+    "6990139455": []
+  },
+  "last_send_date": "2026-10-23",
+  "users": [
+    {
+      "id": 6990139455,
+      "name": "shammik_77",
+      "username": "@shammik_77"
+    },
+    {
+      "id": 1307640212,
+      "name": "dude87fx",
+      "username": "@dude87fx"
+    },
+    {
+      "id": 6093086439,
+      "name": "ronny_g7",
+      "username": "@ronny_g7"
+    },
+    {
+      "id": 1051291465,
+      "name": "paaltayev",
+      "username": "@paaltayev"
+    }
+  ],
+  "tasks": [
+    "🧹 Убрать комнату",
+    "🗑️ Вынести мусор",
+    "🍽️ Помыть посуду"
+  ],
+  "history": [],
+  "send_hour": 0,
+  "send_minute": 0
+}
